@@ -4,8 +4,7 @@ import { retrieveContext } from "@/lib/rag";
 import { generatePalette } from "@/lib/tools/generatePalette";
 import { webSearchTrends } from "@/lib/tools/webSearchTrends";
 
-export const runtime = "nodejs";
-export const maxDuration = 60;
+export const runtime = "edge";
 
 const TOOLS: Parameters<typeof openai.chat.completions.create>[0]["tools"] = [
   {
