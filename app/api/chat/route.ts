@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { openai, CHAT_MODEL } from "@/lib/openai";
+import https from "node:https";
 import { retrieveContext } from "@/lib/rag";
 import { generatePalette } from "@/lib/tools/generatePalette";
 import { webSearchTrends } from "@/lib/tools/webSearchTrends";
@@ -7,18 +7,69 @@ import { webSearchTrends } from "@/lib/tools/webSearchTrends";
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
-const TOOLS: Parameters<typeof openai.chat.completions.create>[0]["tools"] = [
+// Direct HTTPS call — bypasses SDK fetch entirely, guarantees UTF-8 encoding
+function openAIPost(body: object): Promise<{
+  choices: Array<{
+    message: {
+      role: string;
+      content: string | null;
+      tool_calls?: Array<{
+        id: string;
+        type: string;
+        function: { name: string; arguments: string };
+      }>;
+    };
+    finish_reason: string;
+  }>;
+}> {
+  return new Promise((resolve, reject) => {
+    const buf = Buffer.from(JSON.stringify(body), "utf8");
+    const req = https.request(
+      {
+        hostname: "api.openai.com",
+        port: 443,
+        path: "/v1/chat/completions",
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+          "Content-Type": "application/json; charset=utf-8",
+          "Content-Length": buf.length,
+        },
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (c: Buffer) => chunks.push(c));
+        res.on("end", () => {
+          try {
+            const json = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+            if (json.error) reject(new Error(json.error.message));
+            else resolve(json);
+          } catch (e) {
+            reject(e);
+          }
+        });
+        res.on("error", reject);
+      }
+    );
+    req.on("error", reject);
+    req.write(buf);
+    req.end();
+  });
+}
+
+const CHAT_MODEL = process.env.OPENAI_MODEL ?? "gpt-4o-mini";
+
+const TOOLS = [
   {
     type: "function",
     function: {
       name: "generate_palette",
-      description:
-        "Generates a harmonious color palette from a base hex color and mood. MUST be used for all color generation — do not guess hex values.",
+      description: "Generates a color palette. MUST be used for all color generation — never write hex values yourself.",
       parameters: {
         type: "object",
         properties: {
-          base_hex: { type: "string", description: "Base hex color (e.g. #4A6FA5)" },
-          mood: { type: "string", description: "Mood descriptor (e.g. calm, premium, energetic)" },
+          base_hex: { type: "string", description: "Base hex color e.g. #4A6FA5" },
+          mood: { type: "string", description: "Mood e.g. calm, premium, energetic" },
         },
         required: ["base_hex", "mood"],
       },
@@ -28,11 +79,11 @@ const TOOLS: Parameters<typeof openai.chat.completions.create>[0]["tools"] = [
     type: "function",
     function: {
       name: "web_search_trends",
-      description: "Search for latest UI/UX design trends. Use when user asks about trends.",
+      description: "Search latest UI/UX design trends. Use when user asks about trends.",
       parameters: {
         type: "object",
         properties: {
-          query: { type: "string", description: "Search query about UI/UX trends" },
+          query: { type: "string" },
         },
         required: ["query"],
       },
@@ -40,46 +91,39 @@ const TOOLS: Parameters<typeof openai.chat.completions.create>[0]["tools"] = [
   },
 ];
 
-const SYSTEM_PROMPT = (ragContext: string, trendContext = "") =>
-  `You are a design direction advisor. Respond in the same language as the user (Korean or English).
+const SYSTEM_PROMPT = (ragContext: string, trendContext: string) =>
+  `You are a design direction advisor. Respond in the same language as the user.
 
-STRICT RULES:
-1. NEVER write hex color values yourself. Always call generate_palette to get colors.
-2. EVERY response — first request AND follow-ups (더 어둡게, 더 밝게, 바꿔줘, 트렌드 반영 etc.) — MUST call generate_palette and end with a \`\`\`tokens block.
-3. The colors in the tokens block MUST be the exact values returned by generate_palette.
-4. If trend data below contains URLs, list 2-3 as "참고 링크".
+RULES:
+1. NEVER write hex colors yourself — always call generate_palette tool first.
+2. Every response (including follow-ups: darker, lighter, change, etc.) MUST call generate_palette and end with a tokens block.
+3. Colors in tokens block MUST be exact values from generate_palette result.
+${trendContext ? "4. Trend data is provided below — cite 2-3 URLs as references." : ""}
 
-You MUST end every response with this exact block (filled with real values):
+End every response with:
 \`\`\`tokens
 {
-  "mood": ["키워드1", "키워드2"],
-  "rationale": "이 무드가 맞는 이유 한두 줄",
+  "mood": ["keyword1", "keyword2"],
+  "rationale": "why this mood fits",
   "colors": {
-    "primary": "#xxxxxx",
-    "accent": "#xxxxxx",
-    "background": "#xxxxxx",
-    "surface": "#xxxxxx",
-    "text": "#xxxxxx",
-    "textMuted": "#xxxxxx"
+    "primary": "#hex",
+    "accent": "#hex",
+    "background": "#hex",
+    "surface": "#hex",
+    "text": "#hex",
+    "textMuted": "#hex"
   },
-  "typography": {
-    "heading": "FontName",
-    "body": "FontName"
-  }
+  "typography": { "heading": "FontName", "body": "FontName" }
 }
 \`\`\`
 
-KNOWLEDGE BASE:
-${ragContext}${
-    trendContext &&
-    !trendContext.startsWith("[SEARCH_FAILED") &&
-    !trendContext.startsWith("[NO_KEY")
-      ? `\n\nTREND DATA (cite URLs in your response):\n${trendContext.slice(0, 1200)}`
-      : ""
-  }`;
+KNOWLEDGE:
+${ragContext}${trendContext ? `\n\nTREND DATA:\n${trendContext.slice(0, 1000)}` : ""}`;
 
-const TREND_KEYWORDS = ["트렌드", "최신", "trend", "modern", "trendy", "요즘", "현재", "레퍼런스"];
-const MAX_TOOL_ITERATIONS = 5;
+const TREND_KEYWORDS = ["trend", "trendy", "modern", "latest", "트렌드", "최신", "요즘", "현재", "레퍼런스"];
+const MAX_ITERATIONS = 5;
+
+type Msg = { role: string; content: string | null; tool_calls?: unknown[]; tool_call_id?: string };
 
 export async function POST(req: NextRequest) {
   if (!process.env.OPENAI_API_KEY) {
@@ -87,47 +131,37 @@ export async function POST(req: NextRequest) {
   }
 
   const { messages } = await req.json();
-
-  const lastUserMsg =
+  const lastUserMsg: string =
     messages.filter((m: { role: string }) => m.role === "user").at(-1)?.content ?? "";
 
-  const hasTrendRequest = TREND_KEYWORDS.some((k) =>
-    lastUserMsg.toLowerCase().includes(k)
-  );
+  const hasTrend = TREND_KEYWORDS.some((k) => lastUserMsg.toLowerCase().includes(k));
 
   const ragContext = retrieveContext(lastUserMsg);
-  const trendContext = hasTrendRequest
-    ? await webSearchTrends(`${lastUserMsg} app UI UX design trends 2024 2025`)
+  const trendContext = hasTrend
+    ? await webSearchTrends(`${lastUserMsg} UI UX design trends 2025`)
     : "";
-
-  if (hasTrendRequest) {
-    console.log("Trend search result preview:", trendContext.slice(0, 120));
-  }
 
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
     async start(controller) {
-      const send = (data: string) => {
+      const send = (data: string) =>
         controller.enqueue(encoder.encode(`data: ${data}\n\n`));
-      };
 
       try {
-        let msgs: Parameters<typeof openai.chat.completions.create>[0]["messages"] = [
+        const msgs: Msg[] = [
           { role: "system", content: SYSTEM_PROMPT(ragContext, trendContext) },
           ...messages.slice(-6),
         ];
 
         let iterations = 0;
-
-        while (iterations < MAX_TOOL_ITERATIONS) {
+        while (iterations < MAX_ITERATIONS) {
           iterations++;
 
-          const response = await openai.chat.completions.create({
+          const response = await openAIPost({
             model: CHAT_MODEL,
             messages: msgs,
             tools: TOOLS,
             tool_choice: "auto",
-            stream: false,
             max_tokens: 700,
           });
 
@@ -135,27 +169,23 @@ export async function POST(req: NextRequest) {
 
           if (choice.finish_reason === "tool_calls") {
             const toolCalls = choice.message.tool_calls ?? [];
-            msgs.push(choice.message);
+            msgs.push(choice.message as Msg);
 
             for (const tc of toolCalls) {
               if (tc.type !== "function") continue;
-              const fn = tc.function;
-
               let args: Record<string, string>;
               try {
-                args = JSON.parse(fn.arguments);
+                args = JSON.parse(tc.function.arguments);
               } catch {
-                console.error(`Failed to parse args for ${fn.name}`);
                 continue;
               }
 
               let result = "";
-
-              if (fn.name === "generate_palette" && args.base_hex && args.mood) {
+              if (tc.function.name === "generate_palette" && args.base_hex && args.mood) {
                 const palette = generatePalette(args as { base_hex: string; mood: string });
                 result = JSON.stringify(palette);
                 send(JSON.stringify({ type: "tool", name: "generate_palette", result: palette }));
-              } else if (fn.name === "web_search_trends" && args.query) {
+              } else if (tc.function.name === "web_search_trends" && args.query) {
                 result = await webSearchTrends(args.query);
                 send(JSON.stringify({ type: "tool", name: "web_search_trends" }));
               }
@@ -165,7 +195,6 @@ export async function POST(req: NextRequest) {
             continue;
           }
 
-          // Final response: send what we already have (no extra API call)
           const finalContent = choice.message.content ?? "";
           send(JSON.stringify({ type: "delta", content: finalContent }));
           send(JSON.stringify({ type: "done" }));
@@ -173,10 +202,7 @@ export async function POST(req: NextRequest) {
         }
       } catch (err) {
         console.error("Chat error:", err);
-        send(JSON.stringify({
-          type: "error",
-          message: err instanceof Error ? err.message : "Unknown error",
-        }));
+        send(JSON.stringify({ type: "error", message: String(err) }));
       } finally {
         controller.close();
       }
