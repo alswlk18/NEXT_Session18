@@ -1,9 +1,7 @@
-import fs from "fs";
-import path from "path";
 import { openai, EMBEDDING_MODEL } from "./openai";
+import { KNOWLEDGE_DOCS } from "./knowledge";
 
 interface KBEntry {
-  filename: string;
   content: string;
   embedding: number[] | null;
 }
@@ -24,20 +22,11 @@ function cosineSimilarity(a: number[], b: number[]): number {
 async function loadKB(): Promise<KBEntry[]> {
   if (kb) return kb;
 
-  const knowledgeDir = path.join(process.cwd(), "data", "knowledge");
-  const files = fs.readdirSync(knowledgeDir).filter((f) => f.endsWith(".md"));
+  const entries: KBEntry[] = KNOWLEDGE_DOCS.map((content) => ({ content, embedding: null }));
 
-  const entries: KBEntry[] = files.map((f) => ({
-    filename: f,
-    content: fs.readFileSync(path.join(knowledgeDir, f), "utf-8"),
-    embedding: null,
-  }));
-
-  // Embed all documents
-  const texts = entries.map((e) => e.content.slice(0, 8000));
   const embRes = await openai.embeddings.create({
     model: EMBEDDING_MODEL,
-    input: texts,
+    input: entries.map((e) => e.content),
   });
 
   embRes.data.forEach((d, i) => {
@@ -68,7 +57,6 @@ export async function retrieveContext(query: string, topK = 2): Promise<string> 
       .sort((a, b) => b.score - a.score)
       .slice(0, topK);
 
-    // Limit each chunk to ~400 chars to reduce token usage
     return scored.map((s) => s.content.slice(0, 400)).join("\n---\n");
   } catch (err) {
     console.error("RAG error:", err);
