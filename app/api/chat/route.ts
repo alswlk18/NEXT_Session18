@@ -31,7 +31,7 @@ function openAIPost(body: object): Promise<{
         path: "/v1/chat/completions",
         method: "POST",
         headers: {
-          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+          Authorization: `Bearer ${(process.env.OPENAI_API_KEY ?? "").trim()}`,
           "Content-Type": "application/json; charset=utf-8",
           "Content-Length": buf.length,
         },
