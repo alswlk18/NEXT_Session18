@@ -167,25 +167,9 @@ export async function POST(req: NextRequest) {
             continue;
           }
 
-          // Final response: real OpenAI streaming
-          msgs.push({ role: "assistant", content: choice.message.content ?? "" });
-
-          const finalStream = await openai.chat.completions.create({
-            model: CHAT_MODEL,
-            messages: msgs,
-            stream: true,
-            max_tokens: 700,
-          });
-
-          let fullContent = "";
-          for await (const chunk of finalStream) {
-            const delta = chunk.choices[0]?.delta?.content;
-            if (delta) {
-              fullContent += delta;
-              send(JSON.stringify({ type: "delta", content: delta }));
-            }
-          }
-
+          // Final response: send what we already have (no extra API call)
+          const finalContent = choice.message.content ?? "";
+          send(JSON.stringify({ type: "delta", content: finalContent }));
           send(JSON.stringify({ type: "done" }));
           break;
         }
