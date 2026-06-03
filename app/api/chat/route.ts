@@ -95,12 +95,10 @@ export async function POST(req: NextRequest) {
     lastUserMsg.toLowerCase().includes(k)
   );
 
-  const [ragContext, trendContext] = await Promise.all([
-    retrieveContext(lastUserMsg),
-    hasTrendRequest
-      ? webSearchTrends(`${lastUserMsg} app UI UX design trends 2024 2025`)
-      : Promise.resolve(""),
-  ]);
+  const ragContext = retrieveContext(lastUserMsg);
+  const trendContext = hasTrendRequest
+    ? await webSearchTrends(`${lastUserMsg} app UI UX design trends 2024 2025`)
+    : "";
 
   if (hasTrendRequest) {
     console.log("Trend search result preview:", trendContext.slice(0, 120));
